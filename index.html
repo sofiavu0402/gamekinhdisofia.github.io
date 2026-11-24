@@ -1,0 +1,389 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Neon Merge Shooter - Poki Ready</title>
+    <style>
+        * { box-sizing: border-box; user-select: none; -webkit-user-select: none; }
+        body {
+            margin: 0; padding: 0; background-color: #0d0d15;
+            display: flex; justify-content: center; align-items: center;
+            height: 100vh; overflow: hidden; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            color: white;
+        }
+        #game-container {
+            position: relative; width: 100%; max-width: 450px; height: 100%; max-height: 800px;
+            background: #141422; box-shadow: 0 0 20px rgba(0, 255, 204, 0.2);
+            display: flex; flex-direction: column;
+        }
+        canvas { display: block; width: 100%; height: 60%; background: #10101a; }
+        #ui-panel {
+            height: 40%; background: #1a1a2e; padding: 10px;
+            display: flex; flex-direction: column; align-items: center; justify-content: space-between;
+            border-top: 2px solid #00ffcc;
+        }
+        .stats {
+            width: 100%; display: flex; justify-content: space-between;
+            font-size: 18px; font-weight: bold; padding: 0 10px;
+        }
+        #gold-text { color: #ffd700; }
+        #wave-text { color: #00ffcc; }
+        #grid {
+            display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px;
+            width: 220px; height: 220px;
+        }
+        .slot {
+            background: #252540; border: 2px dashed #444466; border-radius: 10px;
+            display: flex; justify-content: center; align-items: center;
+            position: relative; cursor: grab;
+        }
+        .gun {
+            width: 80%; height: 80%; border-radius: 50%;
+            display: flex; justify-content: center; align-items: center;
+            font-weight: bold; font-size: 15px; color: #000;
+            box-shadow: 0 0 10px currentColor; transition: transform 0.1s;
+        }
+        .gun:active { transform: scale(1.1); }
+        #buy-btn {
+            width: 85%; padding: 12px; font-size: 16px; font-weight: bold;
+            background: linear-gradient(45deg, #00ffcc, #0099ff);
+            border: none; border-radius: 25px; color: #000; cursor: pointer;
+            box-shadow: 0 4px 15px rgba(0, 255, 204, 0.4);
+        }
+        #buy-btn:disabled { background: #555; color: #888; box-shadow: none; cursor: not-allowed; }
+        #game-over {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(0,0,0,0.85); display: none;
+            flex-direction: column; justify-content: center; align-items: center; z-index: 10;
+        }
+        #game-over h1 { color: #ff3366; margin-bottom: 10px; }
+        #restart-btn {
+            padding: 12px 30px; font-size: 18px; background: #00ffcc;
+            border: none; border-radius: 20px; font-weight: bold; cursor: pointer;
+        }
+    </style>
+</head>
+<body>
+
+<div id="game-container">
+    <canvas id="gameCanvas"></canvas>
+    
+    <div id="ui-panel">
+        <div class="stats">
+            <span id="wave-text">Wave: 1</span>
+            <span id="gold-text">Vàng: 50</span>
+        </div>
+        
+        <div id="grid"></div>
+        
+        <button id="buy-btn">MUA SÚNG LV.1 (20 Vàng)</button>
+    </div>
+
+    <div id="game-over">
+        <h1>THẤT BẠI!</h1>
+        <p id="final-score" style="margin-bottom: 20px;">Bạn đạt Wave 1</p>
+        <button id="restart-btn">CHƠI LẠI</button>
+    </div>
+</div>
+
+<script>
+    // --- ÂM THANH TỰ TẠO BẰNG CODE (KHÔNG CẦN FILE MP3) ---
+    const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    function playSound(freq, type, duration) {
+        if (audioCtx.state === 'suspended') audioCtx.resume();
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+        osc.type = type;
+        osc.frequency.setValueAtTime(freq, audioCtx.currentTime);
+        gain.gain.setValueAtTime(0.05, audioCtx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + duration);
+        osc.connect(gain);
+        gain.connect(audioCtx.destination);
+        osc.start();
+        osc.stop(audioCtx.currentTime + duration);
+    }
+
+    // --- TÍCH HỢP POKI SDK (MÔ PHỎNG) ---
+    const PokiMock = {
+        gameplayStart: () => console.log("[Poki SDK] Gameplay Started"),
+        gameplayStop: () => console.log("[Poki SDK] Gameplay Stopped"),
+        commercialBreak: (callback) => {
+            console.log("[Poki SDK] Đang chạy quảng cáo...");
+            setTimeout(() => { console.log("[Poki SDK] Hết quảng cáo"); callback(); }, 500);
+        }
+    };
+
+    // --- CẤU HÌNH GAME ---
+    const canvas = document.getElementById('gameCanvas');
+    const ctx = canvas.getContext('2d');
+    const gridEl = document.getElementById('grid');
+    const buyBtn = document.getElementById('buy-btn');
+    const goldText = document.getElementById('gold-text');
+    const waveText = document.getElementById('wave-text');
+    const gameOverEl = document.getElementById('game-over');
+    const restartBtn = document.getElementById('restart-btn');
+
+    let gold = 50;
+    let buyCost = 20;
+    let wave = 1;
+    let isGameOver = false;
+    let slots = Array(9).fill(null);
+    let draggedIndex = null;
+
+    const gunColors = ['#00ffcc', '#00ccff', '#ff00ff', '#ffcc00', '#ff3366', '#ffffff'];
+
+    function resizeCanvas() {
+        canvas.width = canvas.parentElement.clientWidth;
+        canvas.height = canvas.parentElement.clientHeight * 0.6;
+    }
+    window.addEventListener('resize', resizeCanvas);
+    resizeCanvas();
+
+    // --- HỆ THỐNG LƯỚI & MERGE ---
+    function initGrid() {
+        gridEl.innerHTML = '';
+        for (let i = 0; i < 9; i++) {
+            const slot = document.createElement('div');
+            slot.className = 'slot';
+            slot.dataset.index = i;
+
+            slot.addEventListener('dragstart', () => { draggedIndex = i; });
+            slot.addEventListener('dragover', (e) => e.preventDefault());
+            slot.addEventListener('drop', () => handleMerge(draggedIndex, i));
+            slot.addEventListener('click', () => handleTouchMerge(i));
+
+            gridEl.appendChild(slot);
+        }
+        renderGrid();
+    }
+
+    let selectedSlot = null;
+    function handleTouchMerge(index) {
+        if (selectedSlot === null) {
+            if (slots[index] !== null) {
+                selectedSlot = index;
+                gridEl.children[index].style.borderColor = '#ffd700';
+            }
+        } else {
+            gridEl.children[selectedSlot].style.borderColor = '#444466';
+            if (selectedSlot !== index) handleMerge(selectedSlot, index);
+            selectedSlot = null;
+        }
+    }
+
+    function handleMerge(fromIdx, toIdx) {
+        if (fromIdx === null || fromIdx === toIdx || slots[fromIdx] === null) return;
+        
+        if (slots[toIdx] === null) {
+            slots[toIdx] = slots[fromIdx];
+            slots[fromIdx] = null;
+        } else if (slots[fromIdx] === slots[toIdx]) {
+            slots[toIdx]++;
+            slots[fromIdx] = null;
+            playSound(600, 'triangle', 0.15); // Âm thanh ghép thành công
+        }
+        renderGrid();
+    }
+
+    function renderGrid() {
+        for (let i = 0; i < 9; i++) {
+            const slot = gridEl.children[i];
+            slot.innerHTML = '';
+            if (slots[i] !== null) {
+                const lv = slots[i];
+                const gun = document.createElement('div');
+                gun.className = 'gun';
+                gun.draggable = true;
+                gun.innerText = `Lv.${lv}`;
+                const color = gunColors[(lv - 1) % gunColors.length];
+                gun.style.backgroundColor = color;
+                gun.style.color = '#111';
+                slot.appendChild(gun);
+            }
+        }
+        updateUI();
+    }
+
+    function updateUI() {
+        goldText.innerText = `Vàng: ${gold}`;
+        waveText.innerText = `Wave: ${wave}`;
+        buyBtn.innerText = `MUA SÚNG LV.1 (${buyCost} Vàng)`;
+        buyBtn.disabled = gold < buyCost || !slots.includes(null);
+    }
+
+    buyBtn.addEventListener('click', () => {
+        const emptyIdx = slots.indexOf(null);
+        if (gold >= buyCost && emptyIdx !== -1) {
+            gold -= buyCost;
+            buyCost = Math.floor(buyCost * 1.15);
+            slots[emptyIdx] = 1;
+            playSound(400, 'sine', 0.1);
+            renderGrid();
+        }
+    });
+
+    // --- LOGIC BẮN SÚNG, QUÁI VẬT & HIỆU ỨNG NỔ ---
+    let bullets = [];
+    let enemies = [];
+    let particles = [];
+    let lastShot = 0;
+    let spawnTimer = 0;
+    let enemiesKilled = 0;
+
+    const player = { x: canvas.width / 2, y: canvas.height - 40, radius: 18 };
+
+    function getHighestGunLevel() {
+        const activeGuns = slots.filter(s => s !== null);
+        return activeGuns.length > 0 ? Math.max(...activeGuns) : 1;
+    }
+
+    function createExplosion(x, y, color) {
+        for (let i = 0; i < 10; i++) {
+            particles.push({
+                x: x, y: y,
+                vx: (Math.random() - 0.5) * 6,
+                vy: (Math.random() - 0.5) * 6,
+                life: 1.0,
+                color: color
+            });
+        }
+    }
+
+    function spawnEnemy() {
+        const radius = 15 + Math.random() * 8;
+        const hp = Math.floor(10 * Math.pow(1.25, wave - 1));
+        enemies.push({
+            x: Math.random() * (canvas.width - 40) + 20,
+            y: -20,
+            radius: radius,
+            hp: hp,
+            speed: 0.8 + (wave * 0.08)
+        });
+    }
+
+    function update(timestamp) {
+        if (isGameOver) return;
+
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        player.x = canvas.width / 2;
+        player.y = canvas.height - 40;
+
+        // Vẽ vạch ranh giới nguy hiểm
+ctx.strokeStyle = 'rgba(255, 51, 102, 0.3)';
+ctx.beginPath();
+ctx.moveTo(0, player.y - 10);
+ctx.lineTo(canvas.width, player.y - 10);
+ctx.stroke();
+// Vẽ người chơi
+const gunLv = getHighestGunLevel();
+const playerColor = gunColors[(gunLv - 1) % gunColors.length];
+ctx.beginPath();
+ctx.arc(player.x, player.y, player.radius, 0, Math.PI * 2);
+ctx.fillStyle = playerColor;
+ctx.shadowBlur = 15;
+ctx.shadowColor = playerColor;
+ctx.fill();
+ctx.shadowBlur = 0;
+// Tự động bắn
+const fireRate = Math.max(120, 500 - gunLv * 30);
+if (timestamp - lastShot > fireRate && enemies.length > 0) {
+let target = enemies.reduce((prev, curr) => curr.y > prev.y ? curr : prev);
+const angle = Math.atan2(target.y - player.y, target.x - player.x);
+bullets.push({
+x: player.x, y: player.y,
+vx: Math.cos(angle) * 8, vy: Math.sin(angle) * 8,
+damage: 5 * Math.pow(1.6, gunLv - 1),
+color: playerColor
+});
+playSound(800, 'square', 0.03);
+lastShot = timestamp;
+}
+// Cập nhật đạn
+for (let i = bullets.length - 1; i >= 0; i--) {
+let b = bullets[i];
+b.x += b.vx; b.y += b.vy;
+ctx.beginPath();
+ctx.arc(b.x, b.y, 5, 0, Math.PI * 2);
+ctx.fillStyle = b.color;
+ctx.fill();
+if (b.x < 0 || b.x > canvas.width || b.y < 0) bullets.splice(i, 1);
+}
+// Sinh quái
+spawnTimer++;
+const spawnInterval = Math.max(30, 100 - wave * 5);
+if (spawnTimer > spawnInterval) {
+spawnEnemy();
+spawnTimer = 0;
+}
+// Cập nhật quái
+for (let i = enemies.length - 1; i >= 0; i--) {
+let e = enemies[i];
+e.y += e.speed;
+ctx.beginPath();
+ctx.arc(e.x, e.y, e.radius, 0, Math.PI * 2);
+ctx.fillStyle = '#ff3366';
+ctx.fill();
+ctx.fillStyle = 'white';
+ctx.font = 'bold 12px Arial';
+ctx.textAlign = 'center';
+ctx.fillText(Math.ceil(e.hp), e.x, e.y + 4);
+// Va chạm đạn
+for (let j = bullets.length - 1; j >= 0; j--) {
+let b = bullets[j];
+if (Math.hypot(b.x - e.x, b.y - e.y) < e.radius + 5) {
+e.hp -= b.damage;
+bullets.splice(j, 1);
+if (e.hp <= 0) {
+createExplosion(e.x, e.y, '#ff3366');
+playSound(150, 'sawtooth', 0.1);
+gold += 5 + wave * 2;
+enemiesKilled++;
+if (enemiesKilled % 10 === 0) wave++;
+enemies.splice(i, 1);
+updateUI();
+}
+break;
+}
+}
+if (e && e.y + e.radius >= player.y - 10) {
+endGame();
+}
+}
+// Cập nhật hạt nổ
+for (let i = particles.length - 1; i >= 0; i--) {
+let p = particles[i];
+p.x += p.vx; p.y += p.vy;
+p.life -= 0.04;
+ctx.globalAlpha = Math.max(0, p.life);
+ctx.fillStyle = p.color;
+ctx.fillRect(p.x, p.y, 4, 4);
+ctx.globalAlpha = 1.0;
+if (p.life <= 0) particles.splice(i, 1);
+}
+requestAnimationFrame(update);
+}
+function endGame() {
+isGameOver = true;
+PokiMock.gameplayStop();
+document.getElementById('final-score').innerText = Bạn đạt tới Wave ${wave};
+gameOverEl.style.display = 'flex';
+}
+restartBtn.addEventListener('click', () => {
+PokiMock.commercialBreak(() => {
+gold = 50; buyCost = 20; wave = 1; enemiesKilled = 0;
+slots = Array(9).fill(null);
+slots[4] = 1; // Đặt súng Lv.1 vào ô giữa (index 4)
+bullets = []; enemies = []; particles = [];
+isGameOver = false;
+gameOverEl.style.display = 'none';
+renderGrid();
+PokiMock.gameplayStart();
+requestAnimationFrame(update);
+});
+});
+// Khởi chạy game
+slots[4] = 1; // Đặt súng Lv.1 vào ô giữa
+initGrid();
+PokiMock.gameplayStart();
+requestAnimationFrame(update);
